@@ -1,0 +1,293 @@
+package com.example.server.service;
+
+import com.example.server.dto.AgentFeedback;
+import com.example.server.dto.AgentState;
+import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
+import com.example.server.dto.VideoContext;
+import com.example.server.dto.VideoEvidenceHit;
+import com.example.server.entity.MediaFile;
+import com.example.server.mapper.MediaFileMapper;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+/** 视频分析的应用层入口，负责串起上下文构建、AgentLoop 和结果落库。 */
+@Service
+public class AiService {
+
+    private static final Logger log = LoggerFactory.getLogger(AiService.class);
+
+    private final MediaFileMapper mediaFileMapper;
+    private final VideoContextService videoContextService;
+    private final LongVideoContextService longVideoContextService;
+    private final AgentLoopService agentLoopService;
+    private final AgentCheckpointService checkpointService;
+    private final AgentTelemetry telemetry;
+    private final MediaService mediaService;
+    private final TaskEventService taskEventService;
+    private final AnalysisTaskControlService taskControlService;
+    private final RedissonClient redissonClient;
+
+    public AiService(MediaFileMapper mediaFileMapper,
+                     VideoContextService videoContextService,
+                     LongVideoContextService longVideoContextService,
+                     AgentLoopService agentLoopService,
+                     AgentCheckpointService checkpointService,
+                     AgentTelemetry telemetry,
+                     MediaService mediaService,
+                     TaskEventService taskEventService,
+                     AnalysisTaskControlService taskControlService,
+                     RedissonClient redissonClient) {
+        this.mediaFileMapper = mediaFileMapper;
+        this.videoContextService = videoContextService;
+        this.longVideoContextService = longVideoContextService;
+        this.agentLoopService = agentLoopService;
+        this.checkpointService = checkpointService;
+        this.telemetry = telemetry;
+        this.mediaService = mediaService;
+        this.taskEventService = taskEventService;
+        this.taskControlService = taskControlService;
+        this.redissonClient = redissonClient;
+    }
+
+    public void asyncAnalyze(Long mediaId, String userGoal, String runId) {
+        String traceId = telemetry.start(mediaId, userGoal);
+        telemetry.bind(traceId);
+        TaskStage currentStage = TaskStage.VIDEO_CONTEXT;
+        MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
+        if (mediaFile == null) {
+            telemetry.flush(traceId);
+            telemetry.clear();
+            throw new IllegalArgumentException("media does not exist: " + mediaId);
+        }
+
+        try {
+            taskControlService.abortIfRequested(runId);
+            AgentState agentState = checkpointService.loadResult(mediaId, userGoal);
+            if (agentState != null && agentState.result() != null) {
+                telemetry.increment(traceId, "checkpointHits", 1);
+                return;
+            }
+
+            VideoContext videoContext = resolveContext(mediaFile, userGoal, traceId, runId);
+            taskControlService.abortIfRequested(runId);
+            mediaFile.setTranscriptText(videoContext.transcriptText());
+            currentStage = TaskStage.AGENT_LOOP;
+            taskEventService.publishAnalysis(mediaId, userGoal,
+                    TaskStatus.of(TaskStatus.State.PROCESSING, "多模态上下文已就绪，Agent 开始分析"),
+                    TaskStage.AGENT_LOOP);
+            long agentStarted = System.nanoTime();
+            try {
+                agentState = agentLoopService.run(mediaId, videoContext, runId);
+                telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, true);
+            } catch (RuntimeException e) {
+                telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, false);
+                throw e;
+            }
+            taskControlService.abortIfRequested(runId);
+            log.info("agent_analysis_completed traceId={} mediaId={} rounds={}",
+                    traceId, mediaId, agentState.round());
+        } catch (AnalysisTaskControlService.TaskAbortedException e) {
+            throw e;
+        } catch (Exception e) {
+            try {
+                checkpointService.saveFailure(mediaId, userGoal, currentStage, e);
+            } catch (RuntimeException checkpointError) {
+                e.addSuppressed(checkpointError);
+                log.error("agent_failure_checkpoint_write_failed traceId={} mediaId={}",
+                        traceId, mediaId, checkpointError);
+            }
+            log.error("agent_analysis_failed traceId={} mediaId={}", traceId, mediaId, e);
+            if (e instanceof AgentLoopService.BudgetExceededException budgetExceeded) {
+                throw budgetExceeded;
+            }
+            throw new IllegalStateException("AI analysis failed", e);
+        } finally {
+            telemetry.flush(traceId);
+            telemetry.clear();
+        }
+    }
+
+    private VideoContext resolveContext(
+            MediaFile mediaFile, String userGoal, String traceId, String runId) {
+        taskControlService.abortIfRequested(runId);
+        VideoContext checkpoint = checkpointService.loadContext(mediaFile.getId());
+        if (checkpoint != null) {
+            telemetry.increment(traceId, "contextCheckpointHits", 1);
+            return new VideoContext(checkpoint.source(), userGoal, checkpoint.segments());
+        }
+
+        RLock contextLock = redissonClient.getLock("lock:analysis:context:" + mediaFile.getId());
+        boolean acquired = false;
+        try {
+            contextLock.lockInterruptibly();
+            acquired = true;
+            taskControlService.abortIfRequested(runId);
+            checkpoint = checkpointService.loadContext(mediaFile.getId());
+            if (checkpoint != null) {
+                telemetry.increment(traceId, "contextCheckpointHits", 1);
+                return new VideoContext(checkpoint.source(), userGoal, checkpoint.segments());
+            }
+            return buildAndSaveContext(mediaFile, userGoal, traceId, runId);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AnalysisTaskControlService.TaskAbortedException(
+                    taskControlService.stopReason(runId)
+                            .orElse(AnalysisTaskControlService.StopReason.CANCELLED));
+        } finally {
+            if (acquired && contextLock.isHeldByCurrentThread()) contextLock.unlock();
+        }
+    }
+
+    private VideoContext buildAndSaveContext(
+            MediaFile mediaFile, String userGoal, String traceId, String runId) {
+        taskEventService.publishAnalysis(mediaFile.getId(), userGoal,
+                TaskStatus.of(TaskStatus.State.PROCESSING, "正在并行提取语音与关键帧"),
+                TaskStage.VIDEO_CONTEXT);
+        long started = System.nanoTime();
+        try {
+            VideoContext context = videoContextService.build(mediaFile.getFilePath(), userGoal, traceId);
+            try {
+                taskControlService.abortIfRequested(runId);
+                checkpointService.saveContext(mediaFile.getId(), context);
+            } catch (RuntimeException e) {
+                videoContextService.deleteEvidenceFrames(context);
+                throw e;
+            }
+            telemetry.stage(traceId, TaskStage.VIDEO_CONTEXT.name(), started, true);
+            return context;
+        } catch (RuntimeException e) {
+            telemetry.stage(traceId, TaskStage.VIDEO_CONTEXT.name(), started, false);
+            throw e;
+        }
+    }
+
+    public String followUp(Long mediaId, String originalGoal, String question) {
+        VideoContext context = checkpointService.loadContext(mediaId);
+        if (context == null) throw new VideoContextNotReadyException();
+
+        String traceId = telemetry.start(mediaId, question);
+        telemetry.bind(traceId);
+        try {
+            AgentState previous = originalGoal == null
+                    ? null : checkpointService.loadResult(mediaId, originalGoal);
+            String followUpGoal = contextualQuestion(originalGoal, previous, question);
+            VideoContext followUpContext = new VideoContext(
+                    context.source(), followUpGoal, context.segments());
+            return agentLoopService.run(mediaId, followUpContext).result().toMarkdown();
+        } finally {
+            telemetry.flush(traceId);
+            telemetry.clear();
+        }
+    }
+
+    public List<VideoEvidenceHit> searchEvidence(Long mediaId, String query) {
+        VideoContext context = checkpointService.loadContext(mediaId);
+        if (context == null) throw new VideoContextNotReadyException();
+
+        String traceId = telemetry.start(mediaId, query);
+        telemetry.bind(traceId);
+        long started = System.nanoTime();
+        try {
+            VideoContext searchContext = new VideoContext(
+                    context.source(), query, context.segments());
+            List<VideoEvidenceHit> hits =
+                    longVideoContextService.searchEvidence(mediaId, searchContext);
+            telemetry.stage(traceId, TaskStage.RETRIEVAL.name(), started, true);
+            return hits;
+        } catch (RuntimeException e) {
+            telemetry.stage(traceId, TaskStage.RETRIEVAL.name(), started, false);
+            throw e;
+        } finally {
+            telemetry.flush(traceId);
+            telemetry.clear();
+        }
+    }
+
+    public void stageRevision(AgentFeedback feedback) {
+        AgentFeedback normalized = feedback.normalized();
+        checkpointService.saveFeedback(normalized);
+
+        String goal = normalized.correctedGoal() == null || normalized.correctedGoal().isBlank()
+                ? normalized.goal()
+                : normalized.correctedGoal().trim();
+        AgentState.AgentPlan correctedPlan = normalized.correctedTasks().isEmpty()
+                ? null
+                : new AgentState.AgentPlan(goal, normalized.correctedTasks());
+        checkpointService.stageRevision(normalized.mediaId(), goal, correctedPlan);
+    }
+
+    public String revisionGoal(AgentFeedback feedback) {
+        AgentFeedback normalized = feedback.normalized();
+        return normalized.correctedGoal() == null || normalized.correctedGoal().isBlank()
+                ? normalized.goal()
+                : normalized.correctedGoal();
+    }
+
+    public void cancelStagedRevision(Long mediaId, String goal) {
+        checkpointService.cancelStagedRevision(mediaId, goal);
+    }
+
+    public boolean reuseResult(Long mediaId, Long sourceMediaId, AgentState state) {
+        MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
+        if (mediaFile == null) throw new IllegalArgumentException("media does not exist: " + mediaId);
+
+        VideoContext sourceContext = checkpointService.loadContext(sourceMediaId);
+        if (sourceContext == null) return false;
+        checkpointService.saveContext(mediaId, reusableContext(mediaFile.getFilePath(), sourceContext));
+        checkpointService.saveResult(mediaId, new AgentState(
+                state.goal(), state.plan(), state.result(), state.critique(), state.round()));
+        persistResult(mediaFile, state);
+        return true;
+    }
+
+    public AgentState persistCheckpointResult(Long mediaId, String goal) {
+        MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
+        if (mediaFile == null) {
+            throw new IllegalArgumentException("media does not exist: " + mediaId);
+        }
+        AgentState state = checkpointService.loadResult(mediaId, goal);
+        if (state == null || state.result() == null) {
+            throw new IllegalStateException("analysis result checkpoint is missing");
+        }
+        persistResult(mediaFile, state);
+        return state;
+    }
+
+    private VideoContext reusableContext(String targetSource, VideoContext sourceContext) {
+        return new VideoContext(targetSource, "", sourceContext.segments().stream()
+                .map(segment -> new VideoContext.VideoSegment(
+                        segment.startMs(),
+                        segment.endMs(),
+                        segment.transcript(),
+                        segment.ocrTexts(),
+                        segment.evidenceFrames().isEmpty()
+                                ? java.util.List.of()
+                                : java.util.List.of(targetSource + "#timestampMs=" + segment.startMs())))
+                .toList());
+    }
+
+    private String contextualQuestion(String originalGoal, AgentState previous, String question) {
+        if (originalGoal == null || previous == null || previous.result() == null) return question;
+        String previousResult = previous.result().toMarkdown();
+        if (previousResult.length() > 4_000) previousResult = previousResult.substring(0, 4_000);
+        return """
+                这是对同一视频的继续追问。请结合原始视频证据和已有分析回答当前问题。
+                原始目标：%s
+                已有分析：%s
+                当前追问：%s
+                """.formatted(originalGoal, previousResult, question);
+    }
+
+    private void persistResult(MediaFile mediaFile, AgentState agentState) {
+        if (agentState.result() == null) throw new IllegalStateException("Agent 未生成分析结果");
+        mediaFile.setAiSummary(agentState.result().toMarkdown());
+        mediaFileMapper.updateById(mediaFile);
+        mediaService.invalidateUserList(mediaFile.getUserId());
+    }
+}

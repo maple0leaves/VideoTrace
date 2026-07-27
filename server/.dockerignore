@@ -1,0 +1,5 @@
+.m2repo
+target
+.git
+.gitignore
+*.log
