@@ -44,6 +44,7 @@ RUN sed -i \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/*.jar app.jar
+COPY default-media default-media
 
 RUN groupadd --system --gid 10001 appuser && \
     useradd --system --uid 10001 --gid 10001 --create-home appuser && \

@@ -16,11 +16,13 @@ CREATE TABLE IF NOT EXISTS media_files (
     status VARCHAR(32) NOT NULL,
     file_path VARCHAR(1024) NOT NULL,
     content_hash VARCHAR(64) NULL,
+    system_key VARCHAR(64) NULL,
     ai_summary LONGTEXT NULL,
     transcript_text LONGTEXT NULL,
     cover_url VARCHAR(1024) NULL,
     upload_time TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (id),
+    UNIQUE KEY uk_media_user_system_key (user_id, system_key),
     KEY idx_media_content_hash (content_hash),
     KEY idx_media_user_time (user_id, upload_time),
     KEY idx_media_status_time (status, upload_time)
@@ -50,6 +52,32 @@ SET @content_hash_index_sql = IF(
 PREPARE content_hash_index_statement FROM @content_hash_index_sql;
 EXECUTE content_hash_index_statement;
 DEALLOCATE PREPARE content_hash_index_statement;
+
+SET @system_key_column_exists = (
+    SELECT COUNT(1) FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'media_files' AND column_name = 'system_key'
+);
+SET @system_key_column_sql = IF(
+    @system_key_column_exists = 0,
+    'ALTER TABLE media_files ADD COLUMN system_key VARCHAR(64) NULL, ALGORITHM=INSTANT',
+    'SELECT 1'
+);
+PREPARE system_key_column_statement FROM @system_key_column_sql;
+EXECUTE system_key_column_statement;
+DEALLOCATE PREPARE system_key_column_statement;
+SET @system_key_index_exists = (
+    SELECT COUNT(1) FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = 'media_files'
+      AND index_name = 'uk_media_user_system_key'
+);
+SET @system_key_index_sql = IF(
+    @system_key_index_exists = 0,
+    'ALTER TABLE media_files ADD UNIQUE INDEX uk_media_user_system_key(user_id, system_key), ALGORITHM=INPLACE, LOCK=NONE',
+    'SELECT 1'
+);
+PREPARE system_key_index_statement FROM @system_key_index_sql;
+EXECUTE system_key_index_statement;
+DEALLOCATE PREPARE system_key_index_statement;
 
 CREATE TABLE IF NOT EXISTS agent_checkpoints (
     media_id BIGINT NOT NULL,

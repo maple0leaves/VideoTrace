@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  java:
+    name: Java tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: server/pom.xml
+      - name: Test Java server
+        run: mvn --batch-mode -f server/pom.xml verify
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+      - name: Build frontend
+        working-directory: client
+        run: npm run build
+
+  compose:
+    name: Docker Compose validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate local Compose
+        run: docker compose --env-file .env.example -f docker-compose.yml config --quiet
+      - name: Validate production Compose
+        run: docker compose --env-file .env.production.example -f docker-compose.prod.yml config --quiet

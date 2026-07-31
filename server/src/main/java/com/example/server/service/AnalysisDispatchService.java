@@ -68,9 +68,11 @@ public class AnalysisDispatchService {
         String action = revision == null
                 ? AnalysisTaskMsg.START_ANALYSIS
                 : AnalysisTaskMsg.REVISE_ANALYSIS;
-        String contentHash = revision == null ? contentHash(mediaId) : "media-" + mediaId;
+        String contentScope = revision == null
+                ? mediaService.analysisTaskScope(mediaFile)
+                : AnalysisTaskKeys.mediaScope(mediaId);
         String goalDigest = AnalysisTaskKeys.goalDigest(goal);
-        String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
+        String activeKey = AnalysisTaskKeys.active(contentScope, goalDigest);
         String runId = UUID.randomUUID().toString();
         long submittedAt = System.currentTimeMillis();
         long deadlineAt = Math.addExact(submittedAt, maxTaskDurationMs);
@@ -89,7 +91,7 @@ public class AnalysisDispatchService {
             rocketMQTemplate.convertAndSend(
                     analysisTopic,
                     new AnalysisTaskMsg(
-                            mediaId, action, contentHash, goal, runId, submittedAt, deadlineAt));
+                            mediaId, action, contentScope, goal, runId, submittedAt, deadlineAt));
         } catch (RuntimeException e) {
             taskControlService.compareAndDelete(activeKey, runId);
             taskControlService.clearCurrent(mediaId, goal, runId);
@@ -127,10 +129,11 @@ public class AnalysisDispatchService {
 
     public boolean isActive(Long mediaId, String goal) {
         String goalDigest = AnalysisTaskKeys.goalDigest(goal);
+        String contentScope = mediaService.analysisTaskScope(mediaId);
         return Boolean.TRUE.equals(redisTemplate.hasKey(
-                AnalysisTaskKeys.active(contentHash(mediaId), goalDigest)))
+                AnalysisTaskKeys.active(contentScope, goalDigest)))
                 || Boolean.TRUE.equals(redisTemplate.hasKey(
-                AnalysisTaskKeys.active("media-" + mediaId, goalDigest)));
+                AnalysisTaskKeys.active(AnalysisTaskKeys.mediaScope(mediaId), goalDigest)));
     }
 
     private boolean tryAcquireQuota(Long userId) {
@@ -142,11 +145,6 @@ public class AnalysisDispatchService {
         globalLimiter.trySetRate(
                 RateType.OVERALL, GLOBAL_REQUESTS_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
         return globalLimiter.tryAcquire();
-    }
-
-    private String contentHash(Long mediaId) {
-        return AnalysisTaskKeys.normalizeContentHash(
-                mediaId, mediaService.contentHash(mediaId));
     }
 
     public enum SubmissionResult {

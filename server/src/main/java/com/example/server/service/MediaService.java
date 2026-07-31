@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.server.entity.MediaFile;
 import com.example.server.dto.VideoContext;
 import com.example.server.mapper.MediaFileMapper;
+import com.example.server.utils.AnalysisTaskKeys;
 import com.example.server.utils.MinioUtils;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -142,10 +143,31 @@ public class MediaService {
         return persisted;
     }
 
+    public String analysisTaskScope(MediaFile mediaFile) {
+        if (mediaFile == null || mediaFile.getId() == null) {
+            throw new IllegalArgumentException("media is required to create an analysis task scope");
+        }
+        String contentHash = mediaFile.getContentHash();
+        if (contentHash == null || contentHash.isBlank()) {
+            contentHash = contentHash(mediaFile.getId());
+        }
+        return AnalysisTaskKeys.analysisScope(
+                mediaFile.getId(), contentHash, mediaFile.getSystemKey());
+    }
+
+    public String analysisTaskScope(Long mediaId) {
+        MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
+        return mediaFile == null
+                ? AnalysisTaskKeys.mediaScope(mediaId)
+                : analysisTaskScope(mediaFile);
+    }
+
     public void deleteOwnedMedia(Long mediaId, Long userId) {
         MediaFile mediaFile = requireOwnedMedia(mediaId, userId);
         mediaFileMapper.deleteById(mediaId);
-        if (mediaFile.getFilePath() != null && mediaFile.getFilePath().startsWith("http")) {
+        if (mediaFile.getSystemKey() == null
+                && mediaFile.getFilePath() != null
+                && mediaFile.getFilePath().startsWith("http")) {
             try {
                 minioUtils.removeFile(mediaFile.getFilePath());
             } catch (RuntimeException e) {

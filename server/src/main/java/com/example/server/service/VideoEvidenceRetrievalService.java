@@ -6,6 +6,7 @@ import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.dto.VideoRetrievalIntent;
 import com.example.server.utils.DeepSeekUtils;
 import com.example.server.utils.EmbeddingUtils;
+import com.example.server.utils.OcrTextSanitizer;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
@@ -166,7 +167,7 @@ public class VideoEvidenceRetrievalService {
     private List<String> normalizedOcrTexts(VideoContext.VideoSegment segment) {
         return segment.ocrTexts().stream()
                 .filter(java.util.Objects::nonNull)
-                .map(String::trim)
+                .map(OcrTextSanitizer::sanitize)
                 .filter(text -> !text.isBlank())
                 .distinct()
                 .toList();

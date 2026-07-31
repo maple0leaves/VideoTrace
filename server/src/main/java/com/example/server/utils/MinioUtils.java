@@ -6,6 +6,8 @@ import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
+import io.minio.StatObjectArgs;
+import io.minio.errors.ErrorResponseException;
 import io.minio.http.Method;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -128,6 +130,25 @@ public class MinioUtils {
             log.info("minio_object_deleted object={}", objectName);
         } catch (Exception e) {
             throw new IllegalStateException("MinIO 文件删除失败", e);
+        }
+    }
+
+    public boolean objectExists(String objectName) {
+        validateObjectName(objectName);
+        try {
+            minioClient.statObject(StatObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(objectName)
+                    .build());
+            return true;
+        } catch (ErrorResponseException error) {
+            String code = error.errorResponse() == null ? null : error.errorResponse().code();
+            if ("NoSuchKey".equals(code) || "NoSuchObject".equals(code)) {
+                return false;
+            }
+            throw new IllegalStateException("MinIO 文件状态检查失败", error);
+        } catch (Exception error) {
+            throw new IllegalStateException("MinIO 文件状态检查失败", error);
         }
     }
 

@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
@@ -41,17 +42,21 @@ public class AuthService {
     private final StringRedisTemplate redisTemplate;
     private final UserMapper userMapper;
     private final CaptchaService captchaService;
+    private final DefaultMediaProvisioningService defaultMediaProvisioningService;
     private final SecureRandom secureRandom = new SecureRandom();
 
     public AuthService(
             StringRedisTemplate redisTemplate,
             UserMapper userMapper,
-            CaptchaService captchaService) {
+            CaptchaService captchaService,
+            DefaultMediaProvisioningService defaultMediaProvisioningService) {
         this.redisTemplate = redisTemplate;
         this.userMapper = userMapper;
         this.captchaService = captchaService;
+        this.defaultMediaProvisioningService = defaultMediaProvisioningService;
     }
 
+    @Transactional
     public AuthResponse register(AuthRequest request) {
         if (!captchaService.verifyAndConsume(request.captchaId(), request.captchaCode())) {
             return response(400, "验证码错误或已过期，请刷新后重试", null, null);
@@ -85,6 +90,7 @@ public class AuthService {
         } catch (DuplicateKeyException error) {
             return response(409, "该账号已存在", null, null);
         }
+        defaultMediaProvisioningService.provisionUser(user.getId());
         log.info("user_registered userId={} username={}", user.getId(), username);
         return response(200, "注册成功", userView(user), null);
     }

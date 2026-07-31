@@ -26,7 +26,13 @@ require_secret() {
 
 command -v docker >/dev/null || fail "未安装 Docker"
 docker compose version >/dev/null || fail "未安装 Docker Compose v2"
+command -v curl >/dev/null || fail "未安装 curl"
 [[ -f "$ENV_FILE" ]] || fail "找不到配置文件：$ENV_FILE"
+
+if curl --fail --silent --show-error --max-time 2 \
+  http://100.100.100.200/latest/meta-data/instance-id >/dev/null 2>&1; then
+  fail "ECS 元数据仍允许无令牌访问；请启用安全强化模式（HttpTokens=required）"
+fi
 
 shared_network="$(value_of SHARED_NETWORK)"
 shared_network="${shared_network:-shared-platform}"

@@ -18,6 +18,23 @@ public final class AnalysisTaskKeys {
         if (contentHash != null && MD5_PATTERN.matcher(contentHash).matches()) {
             return contentHash.toLowerCase(Locale.ROOT);
         }
+        return mediaScope(mediaId);
+    }
+
+    /**
+     * System-provisioned media (such as the default tutorial) is stored once in
+     * object storage but represented by one media record per user. Its analysis
+     * lifecycle must therefore be isolated by media ID, not by the shared file
+     * hash.
+     */
+    public static String analysisScope(Long mediaId, String contentHash, String systemKey) {
+        if (systemKey != null && !systemKey.isBlank()) {
+            return mediaScope(mediaId);
+        }
+        return normalizeContentHash(mediaId, contentHash);
+    }
+
+    public static String mediaScope(Long mediaId) {
         return "media-" + mediaId;
     }
 

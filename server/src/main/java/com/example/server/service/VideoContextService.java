@@ -4,6 +4,7 @@ import com.example.server.dto.TranscriptSegment;
 import com.example.server.dto.VideoContext;
 import com.example.server.utils.MinioUtils;
 import com.example.server.utils.OcrUtils;
+import com.example.server.utils.OcrTextSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -300,8 +301,9 @@ public class VideoContextService {
         for (FramePart frame : frames) {
             long windowStart = windowStart(frame.timestampMs());
             SegmentBuilder segment = windows.computeIfAbsent(windowStart, SegmentBuilder::new);
-            if (frame.ocrText() != null && !frame.ocrText().isBlank()) {
-                segment.ocrTexts.add(frame.ocrText());
+            String ocrText = OcrTextSanitizer.sanitize(frame.ocrText());
+            if (!ocrText.isBlank()) {
+                segment.ocrTexts.add(ocrText);
             }
             segment.evidenceFrames.add(frame.frameName());
         }

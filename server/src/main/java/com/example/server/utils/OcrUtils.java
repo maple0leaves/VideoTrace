@@ -29,22 +29,26 @@ public class OcrUtils {
     public String recognize(File image) {
         if (image == null || !image.isFile()) throw new IllegalArgumentException("OCR image does not exist");
         Process process = null;
-        Path output = null;
+        Path standardOutput = null;
+        Path errorOutput = null;
         try {
-            output = Files.createTempFile("vidotrace-ocr-", ".txt");
+            standardOutput = Files.createTempFile("vidotrace-ocr-stdout-", ".txt");
+            errorOutput = Files.createTempFile("vidotrace-ocr-stderr-", ".txt");
             process = new ProcessBuilder(
                     ocrCommand, image.getAbsolutePath(), "stdout", "-l", "chi_sim+eng")
-                    .redirectErrorStream(true)
-                    .redirectOutput(output.toFile())
+                    .redirectOutput(standardOutput.toFile())
+                    .redirectError(errorOutput.toFile())
                     .start();
             if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
                 throw new IllegalStateException("OCR execution timed out");
             }
             if (process.exitValue() != 0) {
-                throw new IllegalStateException("OCR process failed with exit code " + process.exitValue());
+                throw new IllegalStateException("OCR process failed with exit code "
+                        + process.exitValue() + errorSuffix(errorOutput));
             }
-            return Files.readString(output, StandardCharsets.UTF_8).trim();
+            return OcrTextSanitizer.sanitize(
+                    Files.readString(standardOutput, StandardCharsets.UTF_8));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("OCR execution interrupted", e);
@@ -52,13 +56,27 @@ public class OcrUtils {
             throw new IllegalStateException("OCR failed for " + image.getName(), e);
         } finally {
             if (process != null && process.isAlive()) process.destroyForcibly();
-            if (output != null) {
-                try {
-                    Files.deleteIfExists(output);
-                } catch (Exception e) {
-                    log.warn("ocr_output_cleanup_failed path={}", output, e);
-                }
-            }
+            deleteTemporaryOutput(standardOutput);
+            deleteTemporaryOutput(errorOutput);
+        }
+    }
+
+    private String errorSuffix(Path errorOutput) {
+        try {
+            String error = Files.readString(errorOutput, StandardCharsets.UTF_8)
+                    .replaceAll("\\s+", " ").trim();
+            return error.isBlank() ? "" : ": " + error.substring(0, Math.min(error.length(), 500));
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private void deleteTemporaryOutput(Path output) {
+        if (output == null) return;
+        try {
+            Files.deleteIfExists(output);
+        } catch (Exception e) {
+            log.warn("ocr_output_cleanup_failed path={}", output, e);
         }
     }
 }

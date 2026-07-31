@@ -29,6 +29,14 @@ services:
     cpus: "0.5"
     mem_limit: 1g
 
+  server-tmp-init:
+    image: busybox:1.36.1
+    restart: "no"
+    user: "0:0"
+    command: sh -c "chown -R 10001:10001 /tmp/vidotrace && chmod 700 /tmp/vidotrace"
+    volumes:
+      - ${VIDEOTRACE_DATA_DIR:?VIDEOTRACE_DATA_DIR is required}/tmp:/tmp/vidotrace
+
   server:
     build:
       context: ./server
@@ -111,6 +119,8 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+      server-tmp-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9090/actuator/health"]
       interval: 15s
