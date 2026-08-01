@@ -45,8 +45,19 @@ public_origin="$(value_of PUBLIC_ORIGIN)"
 
 data_dir="$(value_of VIDEOTRACE_DATA_DIR)"
 [[ "$data_dir" == /* ]] || fail "VIDEOTRACE_DATA_DIR 必须是服务器上的绝对路径"
-available_kb="$(df -Pk "$(dirname "$data_dir")" | awk 'NR==2 {print $4}')"
-[[ "$available_kb" -ge 52428800 ]] || fail "VideoTrace 数据盘可用空间不足 50 GiB"
+[[ -d "$data_dir" ]] || fail "$data_dir 不存在；请先运行共享部署脚本"
+
+data_device="$(df -P "$data_dir" | awk 'NR==2 {print $1}')"
+root_device="$(df -P / | awk 'NR==2 {print $1}')"
+available_kb="$(df -Pk "$data_dir" | awk 'NR==2 {print $4}')"
+if [[ "$data_device" == "$root_device" ]]; then
+  minimum_available_kb=$((10 * 1024 * 1024))
+  minimum_available_label="系统盘至少需要 10 GiB 可用空间"
+else
+  minimum_available_kb=$((50 * 1024 * 1024))
+  minimum_available_label="数据盘至少需要 50 GiB 可用空间"
+fi
+[[ "$available_kb" -ge "$minimum_available_kb" ]] || fail "$minimum_available_label"
 
 require_secret DB_PASSWORD 16
 require_secret REDIS_PASSWORD 16
@@ -62,7 +73,7 @@ vector_dimension="$(value_of VECTOR_DIMENSION)"
 
 if [[ -r /proc/meminfo ]]; then
   memory_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
-  [[ "$memory_kb" -ge 15728640 ]] || fail "两个项目共享部署建议至少 15 GiB 内存"
+  [[ "$memory_kb" -ge 14680064 ]] || fail "两个项目共享部署至少需要 14 GiB 可见内存"
 fi
 
 "${COMPOSE[@]}" config --quiet
